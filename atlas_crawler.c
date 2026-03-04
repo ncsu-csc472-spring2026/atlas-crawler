@@ -67,7 +67,7 @@ static int find_hrefs(Links_ht **links, char *text, regex_t *regex) {
                 shput(*links, link, false);
             } else {
                 shput(*links, link, true);
-            }
+           }
         } else {
             free(link);
         }
@@ -114,19 +114,30 @@ static void save_links_to_file(Links_ht *links, const char *filename) {
     fclose(file);
     printf("Successfully saved %zu links to %s\n", links_count, filename);
 }
+void usage() {
+    printf("Usage: atlas-crawler [URL] [OPTION]...\n");
+    //   printf("      -o <FILE>      Specify output file\n");
+}
 
-int main(void) {
+// TODO: go through each argument and set vars
+void check_args() {}
+
+int main(int argc, char **argv) {
     curl_global_init(CURL_GLOBAL_ALL);
     CURLM *multi_handle = curl_multi_init();
     Links_ht *links = NULL;
-
+    if (argc <= 1) {
+        usage();
+        return 1;
+    }
+    check_args();
+    shput(links, strdup(argv[1]), false);
     regex_t regex;
     const char *pattern = "href=\"(https?://[^\"]+)\"";
     if (regcomp(&regex, pattern, REG_EXTENDED | REG_ICASE) != 0) {
         fprintf(stderr, "Failed to compile regex.\n");
         return -1;
-    } shput(links, strdup("https://www.gaston.k12.nc.us"), false);
-
+    }
     size_t head = 0;
     int active_transfers = 0;
     int pages_crawled = 0;
@@ -164,9 +175,12 @@ int main(void) {
 
                     find_hrefs(&links, ctx->html_body.items, &regex);
                 } else {
+                    if (head == 1) {
+                        fprintf(stderr, "[ERROR] Invalid URL %s (HTTP %ld)\n", ctx->url, http_code);
+                        return 1;
+                    }
                     fprintf(stderr, "[ERROR] Failed %s (HTTP %ld)\n", ctx->url, http_code);
                 }
-
                 curl_multi_remove_handle(multi_handle, eh);
                 curl_easy_cleanup(eh);
                 da_free(ctx->html_body);
