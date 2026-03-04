@@ -1,0 +1,188 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <regex.h>
+#include <curl/curl.h>
+#include <stdbool.h>
+#define NOB_IMPLEMENTATION
+#define STB_DS_IMPLEMENTATION
+#include "thirdparty/nob.h"
+#include "thirdparty/stb_ds.h"
+
+#define MAX_CONCURRENT 75
+#define MAX_PAGES 100000
+
+typedef struct {
+    char *url;
+    String_Builder html_body;
+} ConnContext;
+
+typedef struct {
+    char *key;  // Link
+    bool value; // visted
+} Links_ht;
+
+static size_t write_mem_callback(void *contents, size_t size, size_t nmemb, void *userp) {
+    size_t realsize = size * nmemb;
+    String_Builder *sb = (String_Builder *)userp;
+    sb_append_buf(sb, contents, realsize);
+    return realsize;
+}
+
+static int find_hrefs(Links_ht **links, char *text, regex_t *regex) {
+    regmatch_t pmatch[2]; // pmatch[0] is the whole match, pmatch[1] is the URL inside the quotes
+    char *cursor = text;
+    while (regexec(regex, cursor, 2, pmatch, 0) == 0) {
+        // Calculate the length of the captured URL
+        int start = pmatch[1].rm_so;
+        int end = pmatch[1].rm_eo;
+        int length = end - start;
+
+        char *link = strndup(cursor + start, length);
+        char *question_mark = strchr(link, '?');
+        if (strchr(link, '?') != NULL) {
+            *question_mark = '\0';
+        }
+        char *hash_mark = strchr(link, '#');
+        if (hash_mark != NULL) {
+            *hash_mark = '\0';
+        }
+        if (strstr(link, "chrome-extension") != NULL ||
+        strstr(link, "file://") != NULL ||
+        strstr(link, "C:/") != NULL ||
+        strstr(link, "facebook.com") != NULL ||
+        strstr(link, "instagram.com") != NULL ||
+        strstr(link, "twitter.com") != NULL ||
+        strstr(link, "x.com") != NULL ||
+        strstr(link, "youtube.com") != NULL ||
+        strstr(link, "linkedin.com") != NULL ||
+        strstr(link, "pinterest.com") != NULL) {
+            free(link);
+            cursor += pmatch[0].rm_eo;
+            continue;
+        }
+        if (shgeti(*links, link) == -1) {
+            if (strstr(link, "gcs") != NULL ||
+            strstr(link, "gaston") != NULL) {
+                shput(*links, link, false);
+            } else {
+                shput(*links, link, true);
+            }
+        } else {
+            free(link);
+        }
+        // Move cursor forward
+        cursor += pmatch[0].rm_eo;
+    }
+    return 0;
+}
+
+static CURL *prepare_curl_handle(const char *url) {
+    CURL *eh = curl_easy_init();
+    if (!eh) return NULL;
+
+    ConnContext *ctx = malloc(sizeof(ConnContext));
+    ctx->url = strdup(url);
+    memset(&ctx->html_body, 0, sizeof(String_Builder));
+
+    curl_easy_setopt(eh, CURLOPT_URL, ctx->url);
+    curl_easy_setopt(eh, CURLOPT_WRITEFUNCTION, write_mem_callback);
+    curl_easy_setopt(eh, CURLOPT_WRITEDATA, &ctx->html_body);
+    curl_easy_setopt(eh, CURLOPT_USERAGENT, "Atlas-Sentinel/1.0");
+    curl_easy_setopt(eh, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(eh, CURLOPT_PRIVATE, ctx);
+    curl_easy_setopt(eh, CURLOPT_CONNECTTIMEOUT, 5L);
+    curl_easy_setopt(eh, CURLOPT_TIMEOUT, 10L);
+    curl_easy_setopt(eh, CURLOPT_ACCEPT_ENCODING, "");
+    curl_easy_setopt(eh, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2_0);
+    curl_easy_setopt(eh, CURLOPT_NOSIGNAL, 1L);
+    return eh;
+}
+
+static void save_links_to_file(Links_ht *links, const char *filename) {
+    FILE *file = fopen(filename, "w");
+    if (!file) {
+        fprintf(stderr, "Could not open %s", filename);
+        return;
+    }
+
+    size_t links_count = shlen(links);
+    for (size_t i = 0; i < links_count; i++) {
+        fprintf(file, "%s\n", links[i].key);
+    }
+
+    fclose(file);
+    printf("Successfully saved %zu links to %s\n", links_count, filename);
+}
+
+int main(void) {
+    curl_global_init(CURL_GLOBAL_ALL);
+    CURLM *multi_handle = curl_multi_init();
+    Links_ht *links = NULL;
+
+    regex_t regex;
+    const char *pattern = "href=\"(https?://[^\"]+)\"";
+    if (regcomp(&regex, pattern, REG_EXTENDED | REG_ICASE) != 0) {
+        fprintf(stderr, "Failed to compile regex.\n");
+        return -1;
+    } shput(links, strdup("https://www.gaston.k12.nc.us"), false);
+
+    size_t head = 0;
+    int active_transfers = 0;
+    int pages_crawled = 0;
+
+    while (active_transfers > 0 || (head < (size_t)shlen(links) && pages_crawled < MAX_PAGES)) {
+        while (active_transfers < MAX_CONCURRENT && head < (size_t)shlen(links) && pages_crawled < MAX_PAGES) {
+            if (links[head].value == false) {
+                links[head].value = true; // Mark as visited
+                CURL *eh = prepare_curl_handle(links[head].key);
+                if (eh) {
+                    curl_multi_add_handle(multi_handle, eh);
+                    active_transfers++;
+                    pages_crawled++;
+                    printf("[INFO] Curling: %s\n", links[head].key);
+                }
+            }
+            head++;
+        }
+        curl_multi_perform(multi_handle, &active_transfers);
+        curl_multi_poll(multi_handle, NULL, 0, 1000, NULL);
+        int msgs_left;
+        CURLMsg *msg;
+        while ((msg = curl_multi_info_read(multi_handle, &msgs_left))) {
+            if (msg->msg == CURLMSG_DONE) {
+                CURL *eh = msg->easy_handle;
+                ConnContext *ctx = NULL;
+                long http_code = 0;
+
+                curl_easy_getinfo(eh, CURLINFO_PRIVATE, &ctx);
+                curl_easy_getinfo(eh, CURLINFO_RESPONSE_CODE, &http_code);
+
+                if (msg->data.result == CURLE_OK && http_code == 200) {
+                    sb_append_null(&ctx->html_body);
+                    printf("[INFO] Parsing %lu bytes from %s\n", ctx->html_body.count, ctx->url);
+
+                    find_hrefs(&links, ctx->html_body.items, &regex);
+                } else {
+                    fprintf(stderr, "[ERROR] Failed %s (HTTP %ld)\n", ctx->url, http_code);
+                }
+
+                curl_multi_remove_handle(multi_handle, eh);
+                curl_easy_cleanup(eh);
+                da_free(ctx->html_body);
+                free(ctx->url);
+                free(ctx);
+            }
+        }
+    }
+    save_links_to_file(links, "output.txt");
+    size_t total_found = shlen(links);
+    for (size_t i = 0; i < total_found; i++) {
+        free(links[i].key);
+    }
+    regfree(&regex);
+    shfree(links);
+    curl_multi_cleanup(multi_handle);
+    curl_global_cleanup();
+    return 0;
+}
