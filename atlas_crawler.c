@@ -26,7 +26,7 @@ typedef struct {
 typedef struct {
     char *key;  // Link
     bool value; // visted
-} Links_ht;
+} Link_ht;
 
 static size_t write_mem_callback(void *contents, size_t size, size_t nmemb, void *userp) {
     size_t realsize = size * nmemb;
@@ -35,7 +35,7 @@ static size_t write_mem_callback(void *contents, size_t size, size_t nmemb, void
     return realsize;
 }
 
-static int find_hrefs(Links_ht **links, char *text, regex_t *regex) {
+static int find_hrefs(Link_ht **links, char *text, regex_t *regex) {
     regmatch_t pmatch[2]; // pmatch[0] is the whole match, pmatch[1] is the URL inside the quotes
     char *cursor = text;
     while (regexec(regex, cursor, 2, pmatch, 0) == 0) {
@@ -105,7 +105,7 @@ static CURL *prepare_curl_handle(const char *url) {
     return eh;
 }
 
-static void save_links_to_file(Links_ht *links, const char *filename) {
+static void save_links_to_file(Link_ht *links, const char *filename) {
     FILE *file = fopen(filename, "w");
     if (!file) {
         fprintf(stderr, "Could not open %s", filename);
@@ -120,6 +120,7 @@ static void save_links_to_file(Links_ht *links, const char *filename) {
     fclose(file);
     printf("Successfully saved %zu links to %s\n", links_count, filename);
 }
+
 void usage(const char *prog_name) {
     printf("ATLAS Crawler\n");
     printf("Usage: %s [OPTIONS] <Target URL>\n\n", prog_name);
@@ -159,8 +160,6 @@ static CrawlerConfig parse_arguments(int argc, char **argv) {
         }
     }
 
-    // 3. Grab the positional argument (The Target URL)
-    // optind is the index of the first non-flag argument
     if (optind < argc) {
         config.target_url = argv[optind];
     } else {
@@ -176,7 +175,7 @@ int main(int argc, char **argv) {
     CrawlerConfig config = parse_arguments(argc, argv);
     curl_global_init(CURL_GLOBAL_ALL);
     CURLM *multi_handle = curl_multi_init();
-    Links_ht *links = NULL;
+    Link_ht *links = NULL;
 
     shput(links, strdup(config.target_url), false);
     regex_t regex;
