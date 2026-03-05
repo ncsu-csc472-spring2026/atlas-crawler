@@ -4,13 +4,19 @@
 #include <regex.h>
 #include <curl/curl.h>
 #include <stdbool.h>
+#include <unistd.h>
+
 #define NOB_IMPLEMENTATION
 #define STB_DS_IMPLEMENTATION
 #include "thirdparty/nob.h"
 #include "thirdparty/stb_ds.h"
 
-#define MAX_CONCURRENT 75
-#define MAX_PAGES 100000
+typedef struct {
+    char *target_url;
+    char *output_file;
+    int max_concurrent;
+    int max_pages;
+} CrawlerConfig;
 
 typedef struct {
     char *url;
@@ -114,24 +120,65 @@ static void save_links_to_file(Links_ht *links, const char *filename) {
     fclose(file);
     printf("Successfully saved %zu links to %s\n", links_count, filename);
 }
-void usage() {
-    printf("Usage: atlas-crawler [URL] [OPTION]...\n");
-    //   printf("      -o <FILE>      Specify output file\n");
+void usage(const char *prog_name) {
+    printf("ATLAS Crawler\n");
+    printf("Usage: %s [OPTIONS] <Target URL>\n\n", prog_name);
+    printf("Options:\n");
+    printf("  -o <file>   Output file for discovered assets (default: output.txt)\n");
+    printf("  -c <num>    Max concurrent network sockets (default: 50)\n");
+    printf("  -m <num>    Max pages to crawl (default: 100)\n");
+    printf("  -h          Print this help menu\n");
 }
 
-// TODO: go through each argument and set vars
-void check_args() {}
+static CrawlerConfig parse_arguments(int argc, char **argv) {
+    CrawlerConfig config = {
+        .target_url = NULL,
+        .output_file = "output.txt",
+        .max_concurrent = 50,
+        .max_pages = 100
+    };
+
+    int opt;
+    while ((opt = getopt(argc, argv, "o:c:m:h")) != -1) {
+        switch (opt) {
+            case 'o':
+                config.output_file = optarg;
+                break;
+            case 'c':
+                config.max_concurrent = atoi(optarg); // Convert string to integer
+                break;
+            case 'm':
+                config.max_pages = atoi(optarg);
+                break;
+            case 'h':
+                usage(argv[0]);
+                exit(0);
+            default:
+                usage(argv[0]);
+                exit(1);
+        }
+    }
+
+    // 3. Grab the positional argument (The Target URL)
+    // optind is the index of the first non-flag argument
+    if (optind < argc) {
+        config.target_url = argv[optind];
+    } else {
+        fprintf(stderr, "[ERROR] Missing Target URL.\n\n");
+        usage(argv[0]);
+        exit(1);
+    }
+
+    return config;
+}
 
 int main(int argc, char **argv) {
+    CrawlerConfig config = parse_arguments(argc, argv);
     curl_global_init(CURL_GLOBAL_ALL);
     CURLM *multi_handle = curl_multi_init();
     Links_ht *links = NULL;
-    if (argc <= 1) {
-        usage();
-        return 1;
-    }
-    check_args();
-    shput(links, strdup(argv[1]), false);
+
+    shput(links, strdup(config.target_url), false);
     regex_t regex;
     const char *pattern = "href=\"(https?://[^\"]+)\"";
     if (regcomp(&regex, pattern, REG_EXTENDED | REG_ICASE) != 0) {
@@ -142,8 +189,8 @@ int main(int argc, char **argv) {
     int active_transfers = 0;
     int pages_crawled = 0;
 
-    while (active_transfers > 0 || (head < (size_t)shlen(links) && pages_crawled < MAX_PAGES)) {
-        while (active_transfers < MAX_CONCURRENT && head < (size_t)shlen(links) && pages_crawled < MAX_PAGES) {
+    while (active_transfers > 0 || (head < (size_t)shlen(links) && pages_crawled < config.max_pages)) {
+        while (active_transfers < config.max_concurrent && head < (size_t)shlen(links) && pages_crawled < config.max_pages) {
             if (links[head].value == false) {
                 links[head].value = true; // Mark as visited
                 CURL *eh = prepare_curl_handle(links[head].key);
@@ -189,7 +236,7 @@ int main(int argc, char **argv) {
             }
         }
     }
-    save_links_to_file(links, "output.txt");
+    save_links_to_file(links, config.output_file);
     size_t total_found = shlen(links);
     for (size_t i = 0; i < total_found; i++) {
         free(links[i].key);
