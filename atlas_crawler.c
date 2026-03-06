@@ -16,6 +16,7 @@ typedef struct {
     char *output_file;
     int max_concurrent;
     int max_pages;
+    bool verbose;
 } CrawlerConfig;
 
 typedef struct {
@@ -73,7 +74,7 @@ static int find_hrefs(Link_ht **links, char *text, regex_t *regex) {
                 shput(*links, link, false);
             } else {
                 shput(*links, link, true);
-           }
+            }
         } else {
             free(link);
         }
@@ -125,6 +126,7 @@ void usage(const char *prog_name) {
     printf("ATLAS Crawler\n");
     printf("Usage: %s [OPTIONS] <Target URL>\n\n", prog_name);
     printf("Options:\n");
+    printf("  -v          Enable verbose output\n");
     printf("  -o <file>   Output file for discovered assets (default: output.txt)\n");
     printf("  -c <num>    Max concurrent network sockets (default: 50)\n");
     printf("  -m <num>    Max pages to crawl (default: 100)\n");
@@ -136,27 +138,31 @@ static CrawlerConfig parse_arguments(int argc, char **argv) {
         .target_url = NULL,
         .output_file = "output.txt",
         .max_concurrent = 50,
-        .max_pages = 100
+        .max_pages = 100,
+        .verbose = false
     };
 
     int opt;
-    while ((opt = getopt(argc, argv, "o:c:m:h")) != -1) {
+    while ((opt = getopt(argc, argv, "vo:c:m:h")) != -1) {
         switch (opt) {
-            case 'o':
-                config.output_file = optarg;
-                break;
-            case 'c':
-                config.max_concurrent = atoi(optarg); // Convert string to integer
-                break;
-            case 'm':
-                config.max_pages = atoi(optarg);
-                break;
-            case 'h':
-                usage(argv[0]);
-                exit(0);
-            default:
-                usage(argv[0]);
-                exit(1);
+        case 'v':
+            config.verbose = true;
+            break;
+        case 'o':
+            config.output_file = optarg;
+            break;
+        case 'c':
+            config.max_concurrent = atoi(optarg); // Convert string to integer
+            break;
+        case 'm':
+            config.max_pages = atoi(optarg);
+            break;
+        case 'h':
+            usage(argv[0]);
+            exit(0);
+        default:
+            usage(argv[0]);
+            exit(1);
         }
     }
 
@@ -197,7 +203,9 @@ int main(int argc, char **argv) {
                     curl_multi_add_handle(multi_handle, eh);
                     active_transfers++;
                     pages_crawled++;
-                    printf("[INFO] Curling: %s\n", links[head].key);
+                    if (config.verbose) {
+                        printf("[INFO] Curling: %s\n", links[head].key);
+                    }
                 }
             }
             head++;
@@ -217,7 +225,9 @@ int main(int argc, char **argv) {
 
                 if (msg->data.result == CURLE_OK && http_code == 200) {
                     sb_append_null(&ctx->html_body);
-                    printf("[INFO] Parsing %lu bytes from %s\n", ctx->html_body.count, ctx->url);
+                    if (config.verbose) {
+                        printf("[INFO] Parsing %lu bytes from %s\n", ctx->html_body.count, ctx->url);
+                    }
 
                     find_hrefs(&links, ctx->html_body.items, &regex);
                 } else {
@@ -225,7 +235,9 @@ int main(int argc, char **argv) {
                         fprintf(stderr, "[ERROR] Invalid URL %s (HTTP %ld)\n", ctx->url, http_code);
                         return 1;
                     }
-                    fprintf(stderr, "[ERROR] Failed %s (HTTP %ld)\n", ctx->url, http_code);
+                    if (config.verbose) {
+                        printf("[INFO] Failed %s (HTTP %ld)\n", ctx->url, http_code);
+                    }
                 }
                 curl_multi_remove_handle(multi_handle, eh);
                 curl_easy_cleanup(eh);
