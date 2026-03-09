@@ -16,17 +16,22 @@ typedef struct {
     char *output_file;
     int max_concurrent;
     int max_pages;
+    int max_depth;
     bool verbose;
+    char *blocklist_file;
+    char *allowlist_file;
 } CrawlerConfig;
 
 typedef struct {
     char *url;
     String_Builder html_body;
+    int depth;
 } ConnContext;
 
 typedef struct {
     char *key;  // Link
     bool value; // visted
+    int depth;
 } Link_ht;
 
 static size_t write_mem_callback(void *contents, size_t size, size_t nmemb, void *userp) {
@@ -36,9 +41,10 @@ static size_t write_mem_callback(void *contents, size_t size, size_t nmemb, void
     return realsize;
 }
 
-static int find_hrefs(Link_ht **links, char *text, regex_t *regex) {
+static int find_hrefs(Link_ht **links, CrawlerConfig *config, char *text, regex_t *regex, int curr_depth, char **allowlist, char **blocklist) {
     regmatch_t pmatch[2]; // pmatch[0] is the whole match, pmatch[1] is the URL inside the quotes
     char *cursor = text;
+    int next_depth = curr_depth + 1;
     while (regexec(regex, cursor, 2, pmatch, 0) == 0) {
         // Calculate the length of the captured URL
         int start = pmatch[1].rm_so;
@@ -46,6 +52,7 @@ static int find_hrefs(Link_ht **links, char *text, regex_t *regex) {
         int length = end - start;
 
         char *link = strndup(cursor + start, length);
+        // Strip ? and # off links
         char *question_mark = strchr(link, '?');
         if (strchr(link, '?') != NULL) {
             *question_mark = '\0';
@@ -54,27 +61,46 @@ static int find_hrefs(Link_ht **links, char *text, regex_t *regex) {
         if (hash_mark != NULL) {
             *hash_mark = '\0';
         }
-        if (strstr(link, "chrome-extension") != NULL ||
-        strstr(link, "file://") != NULL ||
-        strstr(link, "C:/") != NULL ||
-        strstr(link, "facebook.com") != NULL ||
-        strstr(link, "instagram.com") != NULL ||
-        strstr(link, "twitter.com") != NULL ||
-        strstr(link, "x.com") != NULL ||
-        strstr(link, "youtube.com") != NULL ||
-        strstr(link, "linkedin.com") != NULL ||
-        strstr(link, "pinterest.com") != NULL) {
-            free(link);
-            cursor += pmatch[0].rm_eo;
-            continue;
+        // Blocklist
+        if (blocklist != NULL) {
+            bool is_blocked = false;
+            for (int i = 0; i < arrlen(blocklist); i++) {
+                if (strstr(link, blocklist[i]) != NULL) {
+                    is_blocked = true;
+                    break;
+                }
+            }
+            if (is_blocked) {
+                free(link);
+                cursor += pmatch[0].rm_eo;
+                continue; // Drop it completely
+            }
         }
         if (shgeti(*links, link) == -1) {
-            if (strstr(link, "gcs") != NULL ||
-            strstr(link, "gaston") != NULL) {
-                shput(*links, link, false);
+            if (allowlist != NULL) {
+                // Allowlist
+                bool is_in_scope = false;
+                if (arrlen(allowlist) > 0) {
+                    for (int i = 0; i < arrlen(allowlist); i++) {
+                        if (strstr(link, allowlist[i]) != NULL) {
+                            is_in_scope = true;
+                            break;
+                        }
+                    }
+                } else {
+                    // Fallback: If no allowlist is provided, assume it's external by default
+                    is_in_scope = true;
+                }
+                if (is_in_scope && next_depth <= config->max_depth) {
+                    shput(*links, link, false);
+                } else {
+                    shput(*links, link, true);
+                }
             } else {
-                shput(*links, link, true);
+                shput(*links, link, false);
             }
+            // Save the depth level we found it at
+            (*links)[shgeti(*links, link)].depth = next_depth;
         } else {
             free(link);
         }
@@ -107,19 +133,22 @@ static CURL *prepare_curl_handle(const char *url) {
 }
 
 static void save_links_to_file(Link_ht *links, const char *filename) {
-    FILE *file = fopen(filename, "w");
+    FILE *file;
+    if (filename == NULL){
+        file = stdout;
+    } else {
+        file = fopen(filename, "w");
+    }
     if (!file) {
         fprintf(stderr, "Could not open %s", filename);
         return;
     }
-
     size_t links_count = shlen(links);
     for (size_t i = 0; i < links_count; i++) {
         fprintf(file, "%s\n", links[i].key);
     }
 
     fclose(file);
-    printf("Successfully saved %zu links to %s\n", links_count, filename);
 }
 
 void usage(const char *prog_name) {
@@ -127,32 +156,47 @@ void usage(const char *prog_name) {
     printf("Usage: %s [OPTIONS] <Target URL>\n\n", prog_name);
     printf("Options:\n");
     printf("  -v          Enable verbose output\n");
-    printf("  -o <file>   Output file for discovered assets (default: output.txt)\n");
+    printf("  -o <file>   Output file for discovered assets\n");
+    printf("  -a <file>   Allowlist file for allowing strings\n");
+    printf("  -b <file>   Blocklist file for blocking strings\n");
     printf("  -c <num>    Max concurrent network sockets (default: 50)\n");
-    printf("  -m <num>    Max pages to crawl (default: 100)\n");
+    printf("  -d <num>    Max depth (default: 3)\n");
+    printf("  -m <num>    Max pages to crawl (default: 1000)\n");
     printf("  -h          Print this help menu\n");
 }
 
 static CrawlerConfig parse_arguments(int argc, char **argv) {
     CrawlerConfig config = {
         .target_url = NULL,
-        .output_file = "output.txt",
+        .allowlist_file = NULL,
+        .blocklist_file = NULL,
+        .output_file = NULL,
         .max_concurrent = 50,
-        .max_pages = 100,
+        .max_pages = 1000,
+        .max_depth = 4,
         .verbose = false
     };
 
     int opt;
-    while ((opt = getopt(argc, argv, "vo:c:m:h")) != -1) {
+    while ((opt = getopt(argc, argv, "vo:c:m:ha:b:d:")) != -1) {
         switch (opt) {
         case 'v':
             config.verbose = true;
+            break;
+        case 'a':
+            config.allowlist_file = optarg;
+            break;
+        case 'b':
+            config.blocklist_file = optarg;
             break;
         case 'o':
             config.output_file = optarg;
             break;
         case 'c':
             config.max_concurrent = atoi(optarg); // Convert string to integer
+            break;
+        case 'd':
+            config.max_depth = atoi(optarg); // Convert string to integer
             break;
         case 'm':
             config.max_pages = atoi(optarg);
@@ -176,9 +220,36 @@ static CrawlerConfig parse_arguments(int argc, char **argv) {
 
     return config;
 }
+static char **load_wordlist(const char *filename) {
+    if (!filename) return NULL;
+    FILE *file = fopen(filename, "r");
+    if (!file) {
+        fprintf(stderr, "[ERROR] Warning: Could not open wordlist %s\n", filename);
+        return NULL;
+    }
+    char **list = NULL;
+    char line[512];
+    while (fgets(line, sizeof(line), file)) {
+        line[strcspn(line, "\r\n")] = 0; // Strip the newline characters
+        if (strlen(line) > 0) {
+            arrput(list, strdup(line));
+        }
+    }
+    fclose(file);
+    printf("[INFO] Loaded %td words from %s\n", arrlen(list), filename);
+    return list;
+}
 
 int main(int argc, char **argv) {
     CrawlerConfig config = parse_arguments(argc, argv);
+    char **allowlist = load_wordlist(config.allowlist_file);
+    if (!allowlist) {
+        fprintf(stderr, "[WARNING] No allowlist given!\n");
+    }
+    char **blocklist = load_wordlist(config.blocklist_file);
+    if (!blocklist) {
+        fprintf(stderr, "[WARNING] No blocklist given!\n");
+    }
     curl_global_init(CURL_GLOBAL_ALL);
     CURLM *multi_handle = curl_multi_init();
     Link_ht *links = NULL;
@@ -228,8 +299,7 @@ int main(int argc, char **argv) {
                     if (config.verbose) {
                         printf("[INFO] Parsing %lu bytes from %s\n", ctx->html_body.count, ctx->url);
                     }
-
-                    find_hrefs(&links, ctx->html_body.items, &regex);
+                    find_hrefs(&links, &config, ctx->html_body.items, &regex, ctx->depth, allowlist, blocklist);
                 } else {
                     if (head == 1) {
                         fprintf(stderr, "[ERROR] Invalid URL %s (HTTP %ld)\n", ctx->url, http_code);
