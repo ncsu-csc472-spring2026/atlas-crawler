@@ -5,5 +5,6 @@
 - Add verbose argument
 
 ## Dependencies
+- [libcurl](https://curl.se/docs/install.html)
 - nob.h lib
 - stb_ds.h lib
