@@ -18,6 +18,7 @@ typedef struct {
     int max_pages;
     int max_depth;
     bool verbose;
+    bool logging;
     char *blocklist_file;
     char *allowlist_file;
 } CrawlerConfig;
@@ -94,7 +95,9 @@ static int find_hrefs(Link_ht **links, CrawlerConfig *config, char *text, regex_
                 if (is_in_scope && next_depth <= config->max_depth) {
                     shput(*links, link, false);
                 } else {
-                    shput(*links, link, true);
+                    if (config->logging) {
+                        shput(*links, link, true);
+                    }
                 }
             } else {
                 shput(*links, link, false);
@@ -156,6 +159,7 @@ void usage(const char *prog_name) {
     printf("Usage: %s [OPTIONS] <Target URL>\n\n", prog_name);
     printf("Options:\n");
     printf("  -v          Enable verbose output\n");
+    printf("  -l          Enable logging of domains not in allow or block lists\n");
     printf("  -o <file>   Output file for discovered assets\n");
     printf("  -a <file>   Allowlist file for allowing strings\n");
     printf("  -b <file>   Blocklist file for blocking strings\n");
@@ -174,39 +178,43 @@ static CrawlerConfig parse_arguments(int argc, char **argv) {
         .max_concurrent = 50,
         .max_pages = 1000,
         .max_depth = 4,
-        .verbose = false
+        .verbose = false,
+        .logging = false
     };
 
     int opt;
-    while ((opt = getopt(argc, argv, "vo:c:m:ha:b:d:")) != -1) {
+    while ((opt = getopt(argc, argv, "lvo:c:m:ha:b:d:")) != -1) {
         switch (opt) {
-        case 'v':
-            config.verbose = true;
-            break;
-        case 'a':
-            config.allowlist_file = optarg;
-            break;
-        case 'b':
-            config.blocklist_file = optarg;
-            break;
-        case 'o':
-            config.output_file = optarg;
-            break;
-        case 'c':
-            config.max_concurrent = atoi(optarg); // Convert string to integer
-            break;
-        case 'd':
-            config.max_depth = atoi(optarg); // Convert string to integer
-            break;
-        case 'm':
-            config.max_pages = atoi(optarg);
-            break;
-        case 'h':
-            usage(argv[0]);
-            exit(0);
-        default:
-            usage(argv[0]);
-            exit(1);
+            case 'v':
+                config.verbose = true;
+                break;
+            case 'l':
+                config.logging = true;
+                break;
+            case 'a':
+                config.allowlist_file = optarg;
+                break;
+            case 'b':
+                config.blocklist_file = optarg;
+                break;
+            case 'o':
+                config.output_file = optarg;
+                break;
+            case 'c':
+                config.max_concurrent = atoi(optarg); // Convert string to integer
+                break;
+            case 'd':
+                config.max_depth = atoi(optarg); // Convert string to integer
+                break;
+            case 'm':
+                config.max_pages = atoi(optarg);
+                break;
+            case 'h':
+                usage(argv[0]);
+                exit(0);
+            default:
+                usage(argv[0]);
+                exit(1);
         }
     }
 
